@@ -1,0 +1,13 @@
+node_modules/
+.next/
+dist/
+output/
+.local/
+.env
+.env.*
+!.env.example
+*.log
+*.tsbuildinfo
+.vercel/
+.DS_Store
+member-login-mobile.png

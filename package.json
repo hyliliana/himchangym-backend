@@ -1,0 +1,35 @@
+{
+  "name": "himchangym-backend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "힘찬짐 회원·직원 공통 NestJS API",
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@11.25.0",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/main.js",
+    "start:dev": "pnpm build && node --watch dist/main.js",
+    "db:setup": "node scripts/setup.cjs",
+    "db:seed": "pnpm build && node scripts/seed.cjs",
+    "test": "pnpm build && node --test test/rules.test.mjs test/schema.test.mjs",
+    "test:integration": "pnpm build && node --test test/integration.test.mjs"
+  },
+  "dependencies": {
+    "@nestjs/common": "12.3.2",
+    "@nestjs/core": "12.3.2",
+    "@nestjs/platform-express": "12.3.2",
+    "dotenv": "^17.2.3",
+    "pg": "8.23.1",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.5",
+    "@types/node": "^24.0.0",
+    "@types/pg": "^8.15.6",
+    "typescript": "7.0.2"
+  },
+  "type": "module"
+}
