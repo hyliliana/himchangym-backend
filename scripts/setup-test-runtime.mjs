@@ -1,0 +1,13 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import {fileURLToPath} from 'node:url';
+import {spawn} from 'node:child_process';
+const dir=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../.local/pg-runtime');
+await fs.mkdir(dir,{recursive:true,mode:0o700});
+await fs.writeFile(path.join(dir,'package.json'),JSON.stringify({name:'himchangym-isolated-postgres-runtime',private:true,type:'module',dependencies:{'embedded-postgres':'18.6.0-beta.19'}},null,2));
+const platforms=['darwin-arm64','darwin-x64','linux-arm','linux-arm64','linux-ia32','linux-ppc64','linux-x64','windows-x64'];
+await fs.writeFile(path.join(dir,'pnpm-workspace.yaml'),'allowBuilds:\n'+platforms.map(p=>`  '@embedded-postgres/${p}': true`).join('\n')+'\n');
+const args=['install'];
+const pnpm=process.env.npm_execpath;
+const child=spawn(pnpm?process.execPath:'pnpm',pnpm?[pnpm,...args]:args,{cwd:dir,stdio:'inherit'});
+process.exitCode=await new Promise((resolve,reject)=>{child.once('error',reject);child.once('exit',code=>resolve(code??1));});

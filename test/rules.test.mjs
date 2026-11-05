@@ -2,6 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as r from '../dist/rules.js';
 
+test('동의 boolean 및 삭제목록 쿼리의 엄격한 형식',()=>{
+ assert.equal(r.boolean(false,'동의'),false);assert.equal(r.boolean(true,'동의'),true);
+ for(const value of ['true','false',1,0,null,undefined])assert.throws(()=>r.boolean(value,'동의'));
+ assert.equal(r.queryBoolean(undefined),false);assert.equal(r.queryBoolean('false'),false);assert.equal(r.queryBoolean('true'),true);
+ for(const value of ['1','yes','TRUE',[],true])assert.throws(()=>r.queryBoolean(value));
+});
+
 test('비밀번호는 매번 다른 salt, 검증 및 손상된 해시 거절',()=>{
  const a=r.hashPassword('test-strong-password'),b=r.hashPassword('test-strong-password');
  assert.notEqual(a,b);assert.ok(a.startsWith('scrypt:'));assert.equal(r.verifyPassword('test-strong-password',a),true);assert.equal(r.verifyPassword('wrong',a),false);assert.equal(r.verifyPassword('x','scrypt:bad:bad'),false);

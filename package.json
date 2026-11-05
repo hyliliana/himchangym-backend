@@ -14,7 +14,10 @@
     "db:setup": "node scripts/setup.cjs",
     "db:seed": "pnpm build && node scripts/seed.cjs",
     "test": "pnpm build && node --test test/rules.test.mjs test/schema.test.mjs",
-    "test:integration": "pnpm build && node --test test/integration.test.mjs"
+    "test:integration": "pnpm build && node scripts/test-integration.mjs",
+    "db:migrate": "node scripts/migrate.cjs",
+    "test:setup": "node scripts/setup-test-runtime.mjs",
+    "qa:isolated": "pnpm build && node scripts/qa-isolated.mjs"
   },
   "dependencies": {
     "@nestjs/common": "12.3.2",
