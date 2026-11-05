@@ -11,6 +11,8 @@ export function int(value: unknown, label: string, min = 1, max = 2147483647): n
   return value as number;
 }
 export function id(value: unknown): number { return int(Number(value), 'ID'); }
+export function boolean(value:unknown,label:string):boolean {if(typeof value!=='boolean')fail(`${label}은(는) true 또는 false여야 합니다.`);return value as boolean;}
+export function queryBoolean(value:unknown):boolean {if(value===undefined||value==='false')return false;if(value==='true')return true;return fail('includeDeleted는 true 또는 false로 입력해 주세요.');}
 export function email(value: unknown): string {
   const v = str(value, '이메일', 254).toLowerCase();
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)) fail('이메일 형식을 확인해 주세요.');

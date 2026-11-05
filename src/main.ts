@@ -2,10 +2,10 @@ import 'reflect-metadata';
 import 'dotenv/config';
 import { NestFactory } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
-import { Module, Controller, Get, Post, Patch, Headers, Body, Param, Query, Req, Catch, ExceptionFilter, ArgumentsHost, HttpException, HttpStatus } from '@nestjs/common';
+import { Module, Controller, Get, Post, Patch, Delete, Headers, Body, Param, Query, Req, Catch, ExceptionFilter, ArgumentsHost, HttpException } from '@nestjs/common';
 import type { Request } from 'express';
 import { GymService } from './service.js';
-import { id } from './rules.js';
+import { id, queryBoolean } from './rules.js';
 import { pool } from './db.js';
 
 @Catch()
@@ -39,11 +39,18 @@ class GymController {
   @Patch('member/profile') async profile(@Headers('authorization') h:string,@Body() b:any){const m=await this.gym.member(await this.gym.authenticate(h));return this.gym.updateMember(m.id,b??{});}
   @Post('member/reservations') async book(@Headers('authorization') h:string,@Body() b:any){return this.gym.book(await this.gym.authenticate(h),b??{});}
   @Post('member/reservations/:id/cancel') async cancel(@Headers('authorization') h:string,@Param('id') v:string){const m=await this.gym.member(await this.gym.authenticate(h));return this.gym.updateReservation(id(v),{status:'cancelled'},m.id);}
+  @Post('member/reservations/:id/reschedule') async reschedule(@Headers('authorization') h:string,@Param('id') v:string,@Body() b:any){return this.gym.reschedule(await this.gym.authenticate(h),id(v),b??{});}
   @Get('member/passes/:id/receipts') async memberReceipts(@Headers('authorization') h:string,@Param('id') v:string){const m=await this.gym.member(await this.gym.authenticate(h));return this.gym.receipts(id(v),m.id);}
+  @Get('member/notification-preferences') async preferences(@Headers('authorization') h:string){return this.gym.notificationPreferences(await this.gym.authenticate(h));}
+  @Patch('member/notification-preferences') async updatePreferences(@Headers('authorization') h:string,@Body() b:any){return this.gym.updateNotificationPreferences(await this.gym.authenticate(h),b);}
   private async staff(h:string,admin=false){const a=await this.gym.authenticate(h);this.gym.requireStaff(a,admin);return a;}
   @Get('admin/dashboard') async adminDashboard(@Headers('authorization') h:string){await this.staff(h);return this.gym.adminDashboard();}
-  @Get('admin/members') async members(@Headers('authorization') h:string,@Query('q') q?:string){await this.staff(h);return this.gym.members(q);}
-  @Patch('admin/members/:id') async updateMember(@Headers('authorization') h:string,@Param('id') v:string,@Body() b:any){await this.staff(h);return this.gym.updateMember(id(v),b??{});}
+  @Get('admin/members') async members(@Headers('authorization') h:string,@Query('q') q?:string,@Query('includeDeleted') deleted?:string){await this.staff(h);return this.gym.members(q,queryBoolean(deleted));}
+  @Post('admin/members') async createMember(@Headers('authorization') h:string,@Body() b:any){await this.staff(h);return this.gym.createMember(b??{});}
+  @Patch('admin/members/:id') async updateMember(@Headers('authorization') h:string,@Param('id') v:string,@Body() b:any){await this.staff(h);return this.gym.updateMember(id(v),b??{},true);}
+  @Delete('admin/members/:id') async deleteMember(@Headers('authorization') h:string,@Param('id') v:string){await this.staff(h);return this.gym.entityState('members',id(v));}
+  @Post('admin/members/:id/restore') async restoreMember(@Headers('authorization') h:string,@Param('id') v:string){await this.staff(h);return this.gym.entityState('members',id(v),true);}
+  @Get('admin/catalog') async adminCatalog(@Headers('authorization') h:string,@Query('includeDeleted') deleted?:string){await this.staff(h);return this.gym.catalog(queryBoolean(deleted));}
   @Get('admin/passes') async passes(@Headers('authorization') h:string,@Query('memberId') m?:string){await this.staff(h);return {passes:await this.gym.passes(m?id(m):undefined)};}
   @Post('admin/passes') async issue(@Headers('authorization') h:string,@Body() b:any){await this.staff(h);return this.gym.issuePass(b??{});}
   @Get('admin/passes/:id/receipts') async adminReceipts(@Headers('authorization') h:string,@Param('id') v:string){await this.staff(h);return this.gym.receipts(id(v));}
@@ -52,8 +59,12 @@ class GymController {
   @Patch('admin/reservations/:id') async updateReservation(@Headers('authorization') h:string,@Param('id') v:string,@Body() b:any){await this.staff(h);return this.gym.updateReservation(id(v),b??{});}
   @Post('admin/trainers') async trainer(@Headers('authorization') h:string,@Body() b:any){await this.staff(h);return this.gym.trainer(b??{});}
   @Patch('admin/trainers/:id') async updateTrainer(@Headers('authorization') h:string,@Param('id') v:string,@Body() b:any){await this.staff(h);return this.gym.trainer(b??{},id(v));}
+  @Delete('admin/trainers/:id') async deleteTrainer(@Headers('authorization') h:string,@Param('id') v:string){await this.staff(h);return this.gym.entityState('trainers',id(v));}
+  @Post('admin/trainers/:id/restore') async restoreTrainer(@Headers('authorization') h:string,@Param('id') v:string){await this.staff(h);return this.gym.entityState('trainers',id(v),true);}
   @Post('admin/pass-types') async passType(@Headers('authorization') h:string,@Body() b:any){await this.staff(h);return this.gym.passType(b??{});}
   @Patch('admin/pass-types/:id') async updatePassType(@Headers('authorization') h:string,@Param('id') v:string,@Body() b:any){await this.staff(h);return this.gym.passType(b??{},id(v));}
+  @Delete('admin/pass-types/:id') async deletePassType(@Headers('authorization') h:string,@Param('id') v:string){await this.staff(h);return this.gym.entityState('pass_types',id(v));}
+  @Post('admin/pass-types/:id/restore') async restorePassType(@Headers('authorization') h:string,@Param('id') v:string){await this.staff(h);return this.gym.entityState('pass_types',id(v),true);}
   @Get('admin/staff') async staffList(@Headers('authorization') h:string){await this.staff(h,true);return this.gym.staff();}
   @Post('admin/staff') async createStaff(@Headers('authorization') h:string,@Body() b:any){await this.staff(h,true);return this.gym.createStaff(b??{});}
   @Patch('admin/staff/:id') async updateStaff(@Headers('authorization') h:string,@Param('id') v:string,@Body() b:any){return this.gym.updateStaff(await this.staff(h,true),id(v),b??{});}
