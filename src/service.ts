@@ -2,13 +2,17 @@ import { Injectable, UnauthorizedException, ForbiddenException, NotFoundExceptio
 import { PoolClient } from 'pg';
 import { pool, transaction } from './db.js';
 import * as r from './rules.js';
+import {lockScheduling,assertSlotBookable} from './schedule.js';
+import {appendLessonEvent,recordLessonEdits} from './lesson-history.js';
 
 const passSelect = `SELECT p.id,p.member_id AS "memberId",m.name AS "memberName",p.type_id AS "typeId",t.name AS "typeName",
 p.purchased_on AS "purchasedOn",p.paid_amount AS "paidAmount",p.expires_on AS "expiresOn",p.total_sessions AS "totalSessions",
 count(v.id) FILTER (WHERE v.status IN ('completed','noshow'))::int AS "usedSessions",
 count(v.id) FILTER (WHERE v.status='booked')::int AS "bookedSessions"
 FROM hw2.passes p JOIN hw2.members m ON m.id=p.member_id JOIN hw2.pass_types t ON t.id=p.type_id LEFT JOIN hw2.reservations v ON v.pass_id=p.id`;
-const reservationSelect = `SELECT v.id,v.member_id AS "memberId",m.name AS "memberName",v.pass_id AS "passId",pt.name AS "typeName",v.trainer_id AS "trainerId",t.name AS "trainerName",v.starts_at AS "startsAt",v.status,v.approval,v.note FROM hw2.reservations v JOIN hw2.members m ON m.id=v.member_id JOIN hw2.passes p ON p.id=v.pass_id JOIN hw2.pass_types pt ON pt.id=p.type_id JOIN hw2.trainers t ON t.id=v.trainer_id`;
+const reservationSelect = `SELECT v.id,v.member_id AS "memberId",m.name AS "memberName",v.pass_id AS "passId",pt.name AS "typeName",v.trainer_id AS "trainerId",t.name AS "trainerName",v.starts_at AS "startsAt",v.status,v.approval,v.note,(t.account_id IS NULL) AS "canDeskDecide",
+(SELECT jsonb_build_object('id',q.id,'startsAt',q.proposed_start,'requestedAt',q.requested_at)
+ FROM hw2.lesson_time_requests q WHERE q.reservation_id=v.id AND q.state='pending') AS "pendingChange" FROM hw2.reservations v JOIN hw2.members m ON m.id=v.member_id JOIN hw2.passes p ON p.id=v.pass_id JOIN hw2.pass_types pt ON pt.id=p.type_id JOIN hw2.trainers t ON t.id=v.trainer_id`;
 const userView = (a: any) => ({ id: a.id, email: a.email, name: a.name, kind: a.kind, role: a.role, mustChangePassword: a.must_change_password });
 const staffView = (a: any) => ({ id:a.id,email:a.email,name:a.name,role:a.role,isActive:a.is_active,mustChangePassword:a.must_change_password });
 const trainerView = (a: any) => ({id:a.id,name:a.name,workingDays:a.working_days,deletedAt:a.deleted_at??null});
@@ -108,36 +112,96 @@ export class GymService {
   async book(a:any,b:any) {
     const member=await this.member(a),passId=r.id(b.passId),trainerId=r.id(b.trainerId),startsAt=r.reservationTime(b.startsAt);
     const reservationId=await transaction(async c=>{
+      await lockScheduling(c);
       await this.lockMember(c,member.id);
       const trainer=await this.lockTrainer(c,trainerId);
       const {rows}=await c.query('SELECT * FROM hw2.passes WHERE id=$1 FOR UPDATE',[passId]);const pass=rows[0];
       if(!pass||pass.member_id!==member.id)throw new ForbiddenException('본인의 이용권만 예약할 수 있습니다.');
       const counts=(await c.query(`SELECT count(*) FILTER (WHERE status IN ('completed','noshow'))::int AS used,count(*) FILTER (WHERE status='booked')::int AS booked FROM hw2.reservations WHERE pass_id=$1`,[passId])).rows[0];
-      r.assertBookable(pass,trainer,startsAt,counts);
-      const result=await c.query('INSERT INTO hw2.reservations(member_id,pass_id,trainer_id,starts_at,approval) VALUES($1,$2,$3,$4,$5) RETURNING id',[member.id,passId,trainerId,startsAt,trainer.account_id===null?'approved':'pending']);return result.rows[0].id;
+      await assertSlotBookable(c,trainerId,startsAt);
+      r.assertBookable(pass,{...trainer,working_days:[new Date(startsAt.getTime()+9*3600000).getUTCDay()]},startsAt,counts);
+      const result=await c.query('INSERT INTO hw2.reservations(member_id,pass_id,trainer_id,starts_at,approval) VALUES($1,$2,$3,$4,$5) RETURNING id',[member.id,passId,trainerId,startsAt,trainer.account_id===null?'approved':'pending']);await appendLessonEvent(c,result.rows[0].id,a,'booked',{}, {startsAt:startsAt.toISOString(),approval:trainer.account_id===null?'approved':'pending'});return result.rows[0].id;
     });
     const result=await pool.query(`${reservationSelect} WHERE v.id=$1`,[reservationId]);return {reservation:result.rows[0]};
   }
-  async updateReservation(reservationId:number,b:any,memberId?:number) {
+  async updateReservation(reservationId:number,b:any,actor:any,memberId?:number) {
     if(b.status===undefined&&b.note===undefined) r.fail('변경할 항목이 없습니다.');
     if(b.note!==undefined&&(typeof b.note!=='string'||b.note.length>5000))r.fail('운동메모는 5,000자 이내로 입력해 주세요.');
     return transaction(async c=>{
       const {reservation:v}=await this.lockReservation(c,reservationId,memberId);
       if(b.status!==undefined){ r.assertTransition(v.status,b.status);if(memberId!==undefined&&b.status!=='cancelled')throw new ForbiddenException('회원은 취소만 가능합니다.');if(memberId!==undefined&&new Date(v.starts_at)<=new Date())r.fail('시작된 예약은 직원에게 문의해 주세요.');if(['completed','noshow'].includes(b.status)&&v.approval!=='approved')r.fail('트레이너 승인 후 완료·노쇼로 변경할 수 있습니다.');if(['completed','noshow'].includes(b.status)&&new Date(v.starts_at)>new Date())r.fail('미래 예약은 완료·노쇼로 변경할 수 없습니다.'); }
+      await recordLessonEdits(c,v,actor,{status:b.status,note:b.note});
       await c.query('UPDATE hw2.reservations SET status=$1,note=$2 WHERE id=$3',[b.status??v.status,b.note??v.note,reservationId]);return {ok:true};
     });
   }
+  private async validateChangeTarget(c:PoolClient,v:any,pass:any,startsAt:Date) {
+    if(v.status!=='booked' || new Date(v.starts_at)<=new Date())r.fail('시작 전 예약만 시간을 변경할 수 있습니다.');
+    const counts=(await c.query(`SELECT count(*) FILTER (WHERE status IN ('completed','noshow'))::int AS used,
+      count(*) FILTER (WHERE status='booked' AND id<>$2)::int AS booked
+      FROM hw2.reservations WHERE pass_id=$1`,[pass.id,v.id])).rows[0];
+    // Published slots already include any working-day exceptions the centre approved.
+    r.assertBookable(pass,{working_days:[0,1,2,3,4,5,6]},startsAt,counts);
+    await assertSlotBookable(c,v.trainer_id,startsAt,{excludeReservationId:v.id});
+    const occupied=await c.query(`SELECT 1 FROM hw2.reservations WHERE member_id=$1 AND starts_at=$2
+      AND id<>$3 AND status<>'cancelled'`,[v.member_id,startsAt,v.id]);
+    if(occupied.rowCount)throw new ConflictException('회원님의 다른 예약과 시간이 겹쳐요.');
+  }
+
   async reschedule(a:any,reservationId:number,b:any) {
     const member=await this.member(a),startsAt=r.reservationTime(b.startsAt);
     return transaction(async c=>{
-      const {reservation:v,pass,trainer}=await this.lockReservation(c,reservationId,member.id);
-      if(v.status!=='booked')r.fail('예약됨 상태의 수업만 시간을 변경할 수 있습니다.');
-      if(new Date(v.starts_at)<=new Date())r.fail('시작된 예약은 시간을 변경할 수 없습니다. 직원에게 문의해 주세요.');
-      if(new Date(v.starts_at).getTime()===startsAt.getTime())return {reservation:(await c.query(`${reservationSelect} WHERE v.id=$1`,[reservationId])).rows[0]};
-      const counts=(await c.query(`SELECT count(*) FILTER (WHERE status IN ('completed','noshow'))::int AS used,count(*) FILTER (WHERE status='booked' AND id<>$2)::int AS booked FROM hw2.reservations WHERE pass_id=$1`,[pass.id,reservationId])).rows[0];
-      r.assertBookable(pass,trainer,startsAt,counts);
-      await c.query('UPDATE hw2.reservations SET starts_at=$1,approval=$2 WHERE id=$3',[startsAt,trainer.account_id===null?'approved':'pending',reservationId]);
-      return {reservation:(await c.query(`${reservationSelect} WHERE v.id=$1`,[reservationId])).rows[0]};
+      await lockScheduling(c);
+      const {reservation:v,pass}=await this.lockReservation(c,reservationId,member.id);
+      if(v.status!=='booked'||new Date(v.starts_at)<=new Date())r.fail('시작 전 예약만 시간을 변경할 수 있습니다.');
+      const getReservation=async()=>({reservation:(await c.query(`${reservationSelect} WHERE v.id=$1`,[v.id])).rows[0]});
+      if(new Date(v.starts_at).getTime()===startsAt.getTime())return getReservation();
+      const open=(await c.query("SELECT proposed_start FROM hw2.lesson_time_requests WHERE reservation_id=$1 AND state='pending'",[v.id])).rows[0];
+      if(open){
+        if(new Date(open.proposed_start).getTime()===startsAt.getTime())return getReservation();
+        throw new ConflictException('대기 중인 변경 요청을 먼저 철회해 주세요.');
+      }
+      await this.validateChangeTarget(c,v,pass,startsAt);
+      await c.query(`INSERT INTO hw2.lesson_time_requests(reservation_id,original_start,proposed_start,requested_by)
+        VALUES($1,$2,$3,$4)`,[v.id,v.starts_at,startsAt,a.id]);
+      await appendLessonEvent(c,v.id,a,'requested',{startsAt:v.starts_at},{startsAt});
+      return getReservation();
+    });
+  }
+
+  async resolveTimeRequest(actor:any,reservationId:number,requestId:number,scope:'member'|'staff'|'trainer',decision:unknown) {
+    if(actor.kind!==scope)throw new ForbiddenException('접근 권한이 없습니다.');
+    if(scope==='member' ? decision!=='withdraw' : !['approve','reject'].includes(String(decision)))r.fail('처리 방법을 확인해 주세요.');
+    return transaction(async c=>{
+      await lockScheduling(c);
+      if(scope==='staff'){
+        const current=(await c.query('SELECT * FROM hw2.accounts WHERE id=$1 FOR SHARE',[actor.id])).rows[0];
+        if(!current?.is_active)throw new UnauthorizedException('이용할 수 없는 계정입니다.');
+        if(current.kind!=='staff'||current.must_change_password)throw new ForbiddenException('접근 권한이 없습니다.');
+        actor=current;
+      }
+      const trainerId=scope==='trainer'?await this.lockTrainerAccount(c,actor):undefined;
+      const memberId=scope==='member'?(await this.member(actor)).id:undefined;
+      const {reservation:v,pass,trainer}=await this.lockReservation(c,reservationId,memberId);
+      if(scope==='trainer' && (trainer.id!==trainerId||trainer.account_id!==actor.id||trainer.deleted_at))
+        throw new ForbiddenException('담당 수업만 처리할 수 있어요.');
+      if(scope==='staff' && trainer.account_id!==null)throw new ForbiddenException('계정이 연결된 트레이너가 직접 처리해야 합니다.');
+      const q=(await c.query('SELECT * FROM hw2.lesson_time_requests WHERE id=$1 AND reservation_id=$2 FOR UPDATE',[requestId,v.id])).rows[0];
+      if(!q)throw new NotFoundException('이 수업의 요청을 찾지 못했어요.');
+      const state=decision==='approve'?'approved':decision==='reject'?'rejected':'withdrawn';
+      if(q.state!== 'pending'){
+        if(q.state===state && q.resolved_by===actor.id)return {ok:true};
+        throw new ConflictException('이미 처리된 요청입니다. 새로고침해 주세요.');
+      }
+      if(decision==='approve'){
+        if(new Date(v.starts_at).getTime()!==new Date(q.original_start).getTime())throw new ConflictException('원래 수업 시간이 변경되었습니다.');
+        await this.validateChangeTarget(c,v,pass,new Date(q.proposed_start));
+        await c.query("UPDATE hw2.reservations SET starts_at=$1,approval='approved' WHERE id=$2",[q.proposed_start,v.id]);
+      }
+      await c.query('UPDATE hw2.lesson_time_requests SET state=$1,resolved_by=$2,resolved_at=clock_timestamp() WHERE id=$3',[state,actor.id,q.id]);
+      const accepted=decision==='approve';
+      await appendLessonEvent(c,v.id,actor,accepted?'approved_change':decision==='reject'?'rejected_change':'withdrawn',
+        {startsAt:accepted?q.original_start:q.proposed_start},{startsAt:accepted?q.proposed_start:q.original_start});
+      return {ok:true};
     });
   }
   async members(q='',includeDeleted=false) { if(typeof q!=='string'||q.length>100)r.fail('검색어는 100자 이내로 입력해 주세요.'); const term=q.trim();const digits=term.replace(/\D/g,'');const {rows}=await pool.query(`SELECT m.*,a.email,a.must_change_password FROM hw2.members m JOIN hw2.accounts a ON a.id=m.account_id WHERE ($3::boolean OR m.deleted_at IS NULL) AND ($1='' OR position(lower($1) in lower(m.name))>0 OR ($2<>'' AND right(m.phone,length($2))=$2)) ORDER BY m.id DESC`,[term,digits,includeDeleted]);return {members:rows.map(memberView)}; }
@@ -221,13 +285,18 @@ export class GymService {
       if(b.approval!==undefined){
         if(new Date(v.starts_at).getTime()!==expectedStartsAt!.getTime())throw new ConflictException('예약 시간이 변경되었습니다. 목록을 새로고침한 뒤 승인해 주세요.');
         if(v.status!=='booked'||v.approval!=='pending')r.fail('승인 대기 중인 예약만 승인·거절할 수 있습니다.');
+        await recordLessonEdits(c,v,a,{approval:b.approval,status:b.approval==='rejected'?'cancelled':'booked'});
         await c.query('UPDATE hw2.reservations SET approval=$1,status=$2 WHERE id=$3',[b.approval,b.approval==='rejected'?'cancelled':'booked',reservationId]);
       }else if(b.status!==undefined){
         r.assertTransition(v.status,b.status);
         if(v.approval!=='approved')r.fail('승인된 수업만 완료·노쇼로 변경할 수 있습니다.');
         if(new Date(v.starts_at)>new Date())r.fail('미래 예약은 완료·노쇼로 변경할 수 없습니다.');
+        await recordLessonEdits(c,v,a,{status:b.status});
         await c.query('UPDATE hw2.reservations SET status=$1 WHERE id=$2',[b.status,reservationId]);
-      }else await c.query('UPDATE hw2.reservations SET note=$1 WHERE id=$2',[b.note,reservationId]);
+      }else{
+        await recordLessonEdits(c,v,a,{note:b.note});
+        await c.query('UPDATE hw2.reservations SET note=$1 WHERE id=$2',[b.note,reservationId]);
+      }
       return {ok:true};
     });
   }
@@ -249,6 +318,11 @@ export class GymService {
         const field=entity==='members'?'member_id':'trainer_id';
         const blocked=(await c.query(`SELECT 1 FROM hw2.reservations WHERE ${field}=$1 AND status='booked' LIMIT 1`,[entityId])).rows[0];
         if(blocked)throw new ConflictException('예약됨 상태의 수업이 있어 삭제할 수 없습니다. 과거 미처리 예약도 먼저 완료·노쇼·취소로 처리해 주세요.');
+      }
+      if(entity==='trainers'){
+        // The trainer row is held FOR UPDATE. Slot writers hold the same profile FOR SHARE.
+        await c.query(`UPDATE hw2.trainer_slots SET status='withdrawn',updated_at=now()
+          WHERE trainer_id=$1 AND starts_at>now() AND status IN ('pending','approved')`,[entityId]);
       }
       await c.query(`UPDATE hw2.${entity} SET deleted_at=now() WHERE id=$1`,[entityId]);
       if((entity==='members'||entity==='trainers')&&row.account_id!==null)await c.query('DELETE FROM hw2.sessions WHERE account_id=$1',[row.account_id]);

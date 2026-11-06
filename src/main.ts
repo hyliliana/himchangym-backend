@@ -5,8 +5,11 @@ import type { NestExpressApplication } from '@nestjs/platform-express';
 import { Module, Controller, Get, Post, Patch, Delete, Headers, Body, Param, Query, Req, Catch, ExceptionFilter, ArgumentsHost, HttpException } from '@nestjs/common';
 import type { Request } from 'express';
 import { GymService } from './service.js';
+import { ScheduleController } from './schedule-controller.js';
+import { ScheduleService } from './schedule.js';
 import { id, queryBoolean } from './rules.js';
 import { pool } from './db.js';
+import { readLessonHistory } from './lesson-history.js';
 
 @Catch()
 class ErrorFilter implements ExceptionFilter {
@@ -38,8 +41,26 @@ class GymController {
   @Get('member/dashboard') async dashboard(@Headers('authorization') h:string){return this.gym.memberDashboard(await this.gym.authenticate(h));}
   @Patch('member/profile') async profile(@Headers('authorization') h:string,@Body() b:any){const m=await this.gym.member(await this.gym.authenticate(h));return this.gym.updateMember(m.id,b??{});}
   @Post('member/reservations') async book(@Headers('authorization') h:string,@Body() b:any){return this.gym.book(await this.gym.authenticate(h),b??{});}
-  @Post('member/reservations/:id/cancel') async cancel(@Headers('authorization') h:string,@Param('id') v:string){const m=await this.gym.member(await this.gym.authenticate(h));return this.gym.updateReservation(id(v),{status:'cancelled'},m.id);}
+  @Post('member/reservations/:id/cancel') async cancel(@Headers('authorization') h:string,@Param('id') v:string){const a=await this.gym.authenticate(h);const m=await this.gym.member(a);return this.gym.updateReservation(id(v),{status:'cancelled'},a,m.id);}
   @Post('member/reservations/:id/reschedule') async reschedule(@Headers('authorization') h:string,@Param('id') v:string,@Body() b:any){return this.gym.reschedule(await this.gym.authenticate(h),id(v),b??{});}
+  @Get('member/reservations/:id/history') async memberHistory(@Headers('authorization') h:string,@Param('id') v:string){
+    return readLessonHistory(id(v),await this.gym.authenticate(h),'member');
+  }
+  @Post('member/reservations/:id/changes/:requestId/withdraw') async memberTimeChange(@Headers('authorization') h:string,@Param('id') v:string,@Param('requestId') q:string){
+    return this.gym.resolveTimeRequest(await this.gym.authenticate(h),id(v),id(q),'member','withdraw');
+  }
+  @Get('admin/reservations/:id/history') async adminHistory(@Headers('authorization') h:string,@Param('id') v:string){
+    return readLessonHistory(id(v),await this.gym.authenticate(h),'staff');
+  }
+  @Post('admin/reservations/:id/changes/:requestId/decision') async adminTimeChange(@Headers('authorization') h:string,@Param('id') v:string,@Param('requestId') q:string,@Body() b:any){
+    return this.gym.resolveTimeRequest(await this.gym.authenticate(h),id(v),id(q),'staff',b?.decision);
+  }
+  @Get('trainer/reservations/:id/history') async trainerHistory(@Headers('authorization') h:string,@Param('id') v:string){
+    return readLessonHistory(id(v),await this.gym.authenticate(h),'trainer');
+  }
+  @Post('trainer/reservations/:id/changes/:requestId/decision') async trainerTimeChange(@Headers('authorization') h:string,@Param('id') v:string,@Param('requestId') q:string,@Body() b:any){
+    return this.gym.resolveTimeRequest(await this.gym.authenticate(h),id(v),id(q),'trainer',b?.decision);
+  }
   @Get('member/passes/:id/receipts') async memberReceipts(@Headers('authorization') h:string,@Param('id') v:string){const m=await this.gym.member(await this.gym.authenticate(h));return this.gym.receipts(id(v),m.id);}
   @Get('member/notification-preferences') async preferences(@Headers('authorization') h:string){return this.gym.notificationPreferences(await this.gym.authenticate(h));}
   @Patch('member/notification-preferences') async updatePreferences(@Headers('authorization') h:string,@Body() b:any){return this.gym.updateNotificationPreferences(await this.gym.authenticate(h),b);}
@@ -60,7 +81,7 @@ class GymController {
   @Get('admin/passes/:id/receipts') async adminReceipts(@Headers('authorization') h:string,@Param('id') v:string){await this.staff(h);return this.gym.receipts(id(v));}
   @Post('admin/passes/:id/receipts') async attachReceipt(@Headers('authorization') h:string,@Param('id') v:string,@Body() b:any){return this.gym.attachReceipt(await this.staff(h),id(v),b??{});}
   @Get('admin/reservations') async reservations(@Headers('authorization') h:string,@Query('date') d?:string,@Query('status') s?:string){await this.staff(h);return {reservations:await this.gym.reservations(undefined,d,s)};}
-  @Patch('admin/reservations/:id') async updateReservation(@Headers('authorization') h:string,@Param('id') v:string,@Body() b:any){await this.staff(h);return this.gym.updateReservation(id(v),b??{});}
+  @Patch('admin/reservations/:id') async updateReservation(@Headers('authorization') h:string,@Param('id') v:string,@Body() b:any){return this.gym.updateReservation(id(v),b??{},await this.staff(h));}
   @Post('admin/trainers') async trainer(@Headers('authorization') h:string,@Body() b:any){await this.staff(h);return this.gym.trainer(b??{});}
   @Patch('admin/trainers/:id') async updateTrainer(@Headers('authorization') h:string,@Param('id') v:string,@Body() b:any){await this.staff(h);return this.gym.trainer(b??{},id(v));}
   @Delete('admin/trainers/:id') async deleteTrainer(@Headers('authorization') h:string,@Param('id') v:string){await this.staff(h);return this.gym.entityState('trainers',id(v));}
@@ -74,7 +95,7 @@ class GymController {
   @Patch('admin/staff/:id') async updateStaff(@Headers('authorization') h:string,@Param('id') v:string,@Body() b:any){return this.gym.updateStaff(await this.staff(h,true),id(v),b??{});}
   @Post('admin/staff/:id/reset-password') async reset(@Headers('authorization') h:string,@Param('id') v:string){await this.staff(h,true);return this.gym.resetPassword(id(v));}
 }
-@Module({controllers:[GymController],providers:[GymService]})
+@Module({controllers:[GymController,ScheduleController],providers:[GymService,ScheduleService]})
 class AppModule{}
 export async function bootstrap(port=Number(process.env.PORT??4100)){
   if(!process.env.DATABASE_URL)throw new Error('DATABASE_URL is required');
