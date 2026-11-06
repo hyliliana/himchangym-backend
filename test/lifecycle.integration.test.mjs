@@ -1,6 +1,7 @@
 import './require-isolated-database.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {publishTestSlots} from './published-slot-fixture.mjs';
 process.env.NODE_ENV='test';
 const {bootstrap}=await import('../dist/main.js');
 const {pool}=await import('../dist/db.js');
@@ -17,7 +18,7 @@ test('격리 PostgreSQL: 삭제·복원·시간 변경·수신 동의와 행 잠
  const admin=await rawStaff('admin'),employee=await rawStaff('employee');
  const staffApi=(path,options={})=>api(path,{token:admin.token,...options});
  const member=async()=>{const n=++sequence,email=`lifecycle-member${n}@example.com`,phone=`010${String(80000000+n)}`;const x=await api('/auth/signup',{method:'POST',body:{email,password,name:`가상회원${n}`,phone}});assert.equal(x.status,201);const m=(await api('/member/dashboard',{token:x.data.token})).data.member;return {...x.data,member:m,email,phone};};
- const trainer=async(days=[0,1,2,3,4,5,6])=>{const x=await staffApi('/admin/trainers',{method:'POST',body:{name:`가상트레이너${++sequence}`,workingDays:days}});assert.equal(x.status,201);return x.data.trainer;};
+ const trainer=async(days=[0,1,2,3,4,5,6])=>{const x=await staffApi('/admin/trainers',{method:'POST',body:{name:`가상트레이너${++sequence}`,workingDays:days}});assert.equal(x.status,201);await publishTestSlots(pool,x.data.trainer.id,admin.user.id);return x.data.trainer;};
  const type=async()=>{const x=await staffApi('/admin/pass-types',{method:'POST',body:{name:`가상이용권${++sequence}`,totalSessions:10,listPrice:500000,validDays:30}});assert.equal(x.status,201);return x.data.passType;};
  const purchaseBody=(m,pt)=>({memberId:m.member.id,typeId:pt.id,purchasedOn:r.addDays(today,-20),paidAmount:450000,expiresOn:r.addDays(today,10)});
  const pass=async(m,pt)=>{const x=await staffApi('/admin/passes',{method:'POST',body:purchaseBody(m,pt)});assert.equal(x.status,201);return x.data.pass;};
@@ -88,13 +89,16 @@ test('격리 PostgreSQL: 삭제·복원·시간 변경·수신 동의와 행 잠
   assert.equal((await api('/member/dashboard',{token:m.token})).data.passes.find(x=>x.id===p.id).availableSessions,0);
   assert.equal((await move(other,v,time(tomorrow,12))).status,403);
   const moved=await move(m,v,time(tomorrow,12));assert.equal(moved.status,201);assert.equal(moved.data.reservation.id,v.id);assert.equal(moved.data.reservation.passId,p.id);assert.equal(moved.data.reservation.trainerId,tr.id);assert.equal(moved.data.reservation.memberId,m.member.id);
+  assert.equal(Date.parse(moved.data.reservation.startsAt),Date.parse(time(tomorrow,10)));
+  const approve=await staffApi('/admin/reservations/'+v.id+'/changes/'+moved.data.reservation.pendingChange.id+'/decision',{method:'POST',body:{decision:'approve'}});
+  assert.equal(approve.status,201);
   const dash=(await api('/member/dashboard',{token:m.token})).data.passes.find(x=>x.id===p.id);assert.equal(dash.usedSessions,9);assert.equal(dash.bookedSessions,1);assert.equal(dash.availableSessions,0);
   assert.equal((await book(other,otherPass,tr,time(tomorrow,13))).status,201);
   assert.equal((await move(m,v,time(tomorrow,13))).status,409);assert.equal(new Date((await snapshot(v.id)).starts_at).toISOString(),new Date(time(tomorrow,12)).toISOString());
   const extraPass=await pass(m,pt);assert.equal((await book(m,extraPass,tr2,time(tomorrow,14))).status,201);
   assert.equal((await move(m,v,time(tomorrow,14))).status,409);assert.equal(new Date((await snapshot(v.id)).starts_at).toISOString(),new Date(time(tomorrow,12)).toISOString());
   for(const input of[time(past,10),`${tomorrow}T12:30:00+09:00`,time(r.addDays(today,11),10)])assert.equal((await move(m,v,input)).status,400);
-  await pool.query('UPDATE hw2.trainers SET working_days=$1 WHERE id=$2',[[],tr.id]);assert.equal((await move(m,v,time(tomorrow,15))).status,400);await pool.query('UPDATE hw2.trainers SET working_days=$1 WHERE id=$2',[[0,1,2,3,4,5,6],tr.id]);
+  // Availability is now defined by individually published slots, including approved exceptions.
   await pool.query('UPDATE hw2.passes SET expires_on=$1 WHERE id=$2',[past,p.id]);assert.equal((await move(m,v,time(tomorrow,15))).status,400);await pool.query('UPDATE hw2.passes SET expires_on=$1 WHERE id=$2',[r.addDays(today,10),p.id]);
   await pool.query('UPDATE hw2.reservations SET starts_at=$1 WHERE id=$2',[time(past,12),v.id]);assert.equal((await move(m,v,time(tomorrow,15))).status,400);
   await pool.query("UPDATE hw2.reservations SET status='cancelled',starts_at=$1 WHERE id=$2",[time(tomorrow,12),v.id]);assert.equal((await move(m,v,time(tomorrow,15))).status,400);
@@ -139,7 +143,7 @@ test('격리 PostgreSQL: 삭제·복원·시간 변경·수신 동의와 행 잠
   await gate('SELECT id FROM hw2.passes WHERE id=$1 FOR UPDATE',[p.id],async release=>{
    const moving=move(m,v,time(tomorrow,19));await blocked(1,'SELECT * FROM hw2.passes%');const deletion=staffApi(`/admin/trainers/${tr.id}`,{method:'DELETE'});await blocked(1,'SELECT * FROM hw2.trainers%');await release();assert.equal((await moving).status,201);assert.equal((await deletion).status,409);
   });
-  assert.equal(new Date((await snapshot(v.id)).starts_at).toISOString(),new Date(time(tomorrow,19)).toISOString());
+  assert.equal(new Date((await snapshot(v.id)).starts_at).toISOString(),new Date(time(tomorrow,18)).toISOString());
   assert.equal((await pool.query('SELECT deleted_at FROM hw2.members WHERE id=$1',[m.member.id])).rows[0].deleted_at,null);assert.equal((await pool.query('SELECT deleted_at FROM hw2.trainers WHERE id=$1',[tr.id])).rows[0].deleted_at,null);
  });
  }finally{await app.close();await pool.end();}

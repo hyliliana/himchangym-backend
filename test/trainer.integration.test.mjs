@@ -1,6 +1,7 @@
 import './require-isolated-database.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {publishTestSlots} from './published-slot-fixture.mjs';
 import { bootstrap } from '../dist/main.js';
 import { pool } from '../dist/db.js';
 import { hashPassword, temporaryPassword, kstDate, addDays } from '../dist/rules.js';
@@ -35,7 +36,8 @@ test('담당 수업만 승인·거절하고 회원과 피드백 및 이용 횟�
     const { token: member } = await ok('POST', '/auth/signup', null, { email:'trainer-test-member@example.com', password, name:'검수 회원', phone:'01000007634' });
     const dashboard = () => ok('GET', '/member/dashboard', member);
     const memberId = (await dashboard()).member.id;
-    const makeTrainer = async name => (await ok('POST', '/admin/trainers', desk, {name, workingDays:[0,1,2,3,4,5,6]})).trainer.id;
+    const adminId=(await ok('GET','/auth/me',admin)).user.id;
+    const makeTrainer = async name => {const id=(await ok('POST', '/admin/trainers', desk, {name, workingDays:[0,1,2,3,4,5,6]})).trainer.id;await publishTestSlots(pool,id,adminId);return id;};
     const first = await makeTrainer('담당 트레이너');
     const second = await makeTrainer('다른 트레이너');
     const type = (await ok('POST','/admin/pass-types', desk, {name:'검수 PT', totalSessions:10, listPrice:500000, validDays:30})).passType;
@@ -75,11 +77,26 @@ test('담당 수업만 승인·거절하고 회원과 피드백 및 이용 횟�
     const noChange = await ok('POST', '/member/reservations/' + original.id + '/reschedule',member,{startsAt:original.startsAt});
     assert.equal(noChange.reservation.approval,'approved');
     const moved = (await ok('POST','/member/reservations/' + original.id + '/reschedule',member,{startsAt:start('11')})).reservation;
-    assert.equal(moved.approval,'pending');
-    await denied('PATCH',route,trainer,decision('approved',original.startsAt),[409]);
-    const simultaneous = await Promise.all(['approved','rejected'].map(approval =>
-      request('PATCH',route,trainer,decision(approval,moved.startsAt))));
-    assert.equal(simultaneous.filter(x => x.status === 200).length,1);
+    assert.equal(moved.approval,'approved');
+    assert.equal(Date.parse(moved.startsAt),Date.parse(original.startsAt));
+    assert.equal(Date.parse(moved.pendingChange.startsAt),Date.parse(start('11')));
+    const changeDecision=route+'/changes/'+moved.pendingChange.id+'/decision';
+    await denied('POST',changeDecision,other,{decision:'approve'});
+    await denied('GET',route+'/history',other);
+    await denied('POST','/admin/reservations/'+original.id+'/changes/'+moved.pendingChange.id+'/decision',desk,{decision:'approve'});
+    await ok('POST',changeDecision,trainer,{decision:'reject'});
+    const rejectedMove=(await dashboard()).reservations.find(row=>row.id===original.id);
+    assert.equal(Date.parse(rejectedMove.startsAt),Date.parse(original.startsAt));
+    assert.equal(rejectedMove.pendingChange,null);
+    const nextMove=(await ok('POST','/member/reservations/'+original.id+'/reschedule',member,{startsAt:start('11')})).reservation;
+    const simultaneous = await Promise.all(['approve','reject'].map(value =>
+      request('POST',route+'/changes/'+nextMove.pendingChange.id+'/decision',trainer,{decision:value})));
+    assert.equal(simultaneous.filter(x=>x.status===201).length,1);
+    const historyUrl='/member/reservations/'+original.id+'/history';
+    const log=(await ok('GET',historyUrl,member)).history;
+    assert.deepEqual(log,(await ok('GET',route+'/history',trainer)).history);
+    assert.ok(log.some(entry=>entry.event==='requested' && entry.actorRole==='member' && Date.parse(entry.after.startsAt)===Date.parse(start('11'))));
+    assert.ok(log.some(entry=>entry.event==='rejected_change' && entry.actorRole==='trainer'));
     const rejected = await book(first,'12');
     const avail = async () => (await dashboard()).passes.find(row => row.id === pass.id);
     const before = await avail();
@@ -101,7 +118,30 @@ test('담당 수업만 승인·거절하고 회원과 피드백 및 이용 횟�
     await ok('PATCH',legacyRoute,trainer,{note:'다음 수업 전까지 스쿼트 호흡 연습'});
     assert.equal((await avail()).usedSessions,used+1);
     assert.equal((await dashboard()).reservations.find(row => row.id === legacy.id).note,'다음 수업 전까지 스쿼트 호흡 연습');
+    await ok('PATCH',legacyRoute,trainer,{note:'호흡 연습과 런지 추가'});
+    await ok('PATCH',legacyRoute,trainer,{note:'호흡 연습과 런지 추가'});
+    const feedback=(await ok('GET','/member/reservations/'+legacy.id+'/history',member)).history.filter(x=>x.event==='feedback');
+    assert.equal(feedback.length,2);
+    assert.equal(feedback[0].before.note,'다음 수업 전까지 스쿼트 호흡 연습');
+    assert.equal(feedback[0].after.note,'호흡 연습과 런지 추가');
+    assert.ok(feedback[0].actorName && Number.isFinite(Date.parse(feedback[0].changedAt)));
     await denied('PATCH', replacementRoute, other, {status:'noshow'});
+
+    // Target time can be taken after a change request: failed approval preserves the source.
+    const conflictSource=await book(first,'17');
+    await ok('PATCH','/trainer/reservations/'+conflictSource.id,trainer,decision('approved',conflictSource.startsAt));
+    const conflictRequest=(await ok('POST','/member/reservations/'+conflictSource.id+'/reschedule',member,{startsAt:start('18')})).reservation.pendingChange;
+    const targetBooking=await book(first,'18');
+    const conflictDecision='/trainer/reservations/'+conflictSource.id+'/changes/'+conflictRequest.id+'/decision';
+    await denied('POST',conflictDecision,trainer,{decision:'approve'},[409]);
+    const preserved=(await dashboard()).reservations.find(row=>row.id===conflictSource.id);
+    assert.equal(Date.parse(preserved.startsAt),Date.parse(conflictSource.startsAt));
+    assert.equal(preserved.approval,'approved');assert.equal(preserved.pendingChange.id,conflictRequest.id);
+    const failedLog=(await ok('GET','/member/reservations/'+conflictSource.id+'/history',member)).history;
+    assert.ok(!failedLog.some(row=>row.event==='approved_change'));
+    await ok('POST',conflictDecision,trainer,{decision:'reject'});
+    await ok('POST','/member/reservations/'+targetBooking.id+'/cancel',member);
+    await ok('POST','/member/reservations/'+conflictSource.id+'/cancel',member);
 
     const resetPath = '/admin/trainers/' + second + '/reset-password';
     await denied('POST', resetPath, desk);

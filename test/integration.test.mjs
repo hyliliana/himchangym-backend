@@ -1,6 +1,7 @@
 import './require-isolated-database.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {publishTestSlots} from './published-slot-fixture.mjs';
 import 'dotenv/config';
 process.env.NODE_ENV='test';
 const {bootstrap}=await import('../dist/main.js');
@@ -25,6 +26,7 @@ test('실제 PostgreSQL: API 인증·소유권·직원권한·경쟁조건·상�
   const trainer2=(await api('/admin/trainers',{method:'POST',token:admin.token,body:{name:'가상 휴무트레이너',workingDays:[]}})).data.trainer;trainerIds.push(trainer2.id);
   const type=(await api('/admin/pass-types',{method:'POST',token:admin.token,body:{name:'가상 검증이용권',totalSessions:10,listPrice:500000,validDays:30}})).data.passType;typeIds.push(type.id);
   const today=r.kstDate(),tomorrow=r.addDays(today,1),past=r.addDays(today,-1);
+  await publishTestSlots(pool,trainer.id,admin.user.id);
   const pass=async(memberId,extra={})=>{const x=await api('/admin/passes',{method:'POST',token:admin.token,body:{memberId,typeId:type.id,purchasedOn:r.addDays(today,-15),paidAmount:450000,expiresOn:r.addDays(today,10),...extra}});assert.equal(x.status,201);return x.data.pass;};
   const p=await pass(am.id),pb=await pass(bm.id);
   const png='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a4iQAAAAASUVORK5CYII=';
@@ -49,7 +51,7 @@ test('실제 PostgreSQL: API 인증·소유권·직원권한·경쟁조건·상�
   assert.equal((await pool.query('SELECT count(*)::int AS n FROM hw2.pass_receipts WHERE pass_id=$1',[pb.id])).rows[0].n,1);
   const book=(token,passId,trainerId,day,hour)=>api('/member/reservations',{method:'POST',token,body:{passId,trainerId,startsAt:`${day}T${String(hour).padStart(2,'0')}:00:00+09:00`}});
   assert.equal((await book(b.token,p.id,trainer.id,tomorrow,9)).status,403);
-  assert.equal((await book(a.token,p.id,trainer2.id,tomorrow,9)).status,400);
+  assert.equal((await book(a.token,p.id,trainer2.id,tomorrow,9)).status,409);
   const expired=await pass(am.id,{expiresOn:past});assert.equal((await book(a.token,expired.id,trainer.id,tomorrow,9)).status,400);
   // Fill nine sessions directly as historical data, leaving exactly one slot.
   for(let i=0;i<9;i++)await pool.query(`INSERT INTO hw2.reservations(member_id,pass_id,trainer_id,starts_at,status) VALUES($1,$2,$3,$4,'completed')`,[am.id,p.id,trainer.id,`${r.addDays(today,-(i+1))}T09:00:00+09:00`]);
@@ -91,7 +93,8 @@ test('실제 PostgreSQL: API 인증·소유권·직원권한·경쟁조건·상�
   assert.equal((await api('/auth/logout',{method:'POST',token:a.token})).status,201);assert.equal((await api('/auth/me',{token:a.token})).status,401);
  }finally{
   // Only IDs created by this test are removed, strictly inside hw2.
-  if(memberIds.length){await pool.query('DELETE FROM hw2.pass_receipts WHERE pass_id IN (SELECT id FROM hw2.passes WHERE member_id=ANY($1::int[]))',[memberIds]);await pool.query('DELETE FROM hw2.reservations WHERE member_id=ANY($1::int[])',[memberIds]);await pool.query('DELETE FROM hw2.passes WHERE member_id=ANY($1::int[])',[memberIds]);await pool.query('DELETE FROM hw2.members WHERE id=ANY($1::int[])',[memberIds]);}
+  if(memberIds.length){await pool.query('DELETE FROM hw2.lesson_history WHERE reservation_id IN (SELECT id FROM hw2.reservations WHERE member_id=ANY($1::int[]))',[memberIds]);await pool.query('DELETE FROM hw2.lesson_time_requests WHERE reservation_id IN (SELECT id FROM hw2.reservations WHERE member_id=ANY($1::int[]))',[memberIds]);await pool.query('DELETE FROM hw2.pass_receipts WHERE pass_id IN (SELECT id FROM hw2.passes WHERE member_id=ANY($1::int[]))',[memberIds]);await pool.query('DELETE FROM hw2.reservations WHERE member_id=ANY($1::int[])',[memberIds]);await pool.query('DELETE FROM hw2.passes WHERE member_id=ANY($1::int[])',[memberIds]);await pool.query('DELETE FROM hw2.members WHERE id=ANY($1::int[])',[memberIds]);}
+  if(trainerIds.length){await pool.query('DELETE FROM hw2.trainer_slots WHERE trainer_id=ANY($1::int[])',[trainerIds]);await pool.query('DELETE FROM hw2.trainer_contracts WHERE trainer_id=ANY($1::int[])',[trainerIds]);}
   if(accountIds.length){await pool.query('DELETE FROM hw2.sessions WHERE account_id=ANY($1::int[])',[accountIds]);await pool.query('DELETE FROM hw2.accounts WHERE id=ANY($1::int[])',[accountIds]);}
   if(trainerIds.length)await pool.query('DELETE FROM hw2.trainers WHERE id=ANY($1::int[])',[trainerIds]);
   if(typeIds.length)await pool.query('DELETE FROM hw2.pass_types WHERE id=ANY($1::int[])',[typeIds]);
