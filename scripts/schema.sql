@@ -3,11 +3,11 @@ CREATE TABLE IF NOT EXISTS hw2.accounts (
  id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
  email text NOT NULL UNIQUE CHECK (email = lower(email)), password_hash text NOT NULL,
  name text NOT NULL CHECK (length(trim(name)) BETWEEN 1 AND 100),
- kind text NOT NULL CHECK (kind IN ('member','staff')),
+ kind text NOT NULL CHECK (kind IN ('member','staff','trainer')),
  role text CHECK (role IN ('admin','employee')), is_active boolean NOT NULL DEFAULT true,
  must_change_password boolean NOT NULL DEFAULT false,
  created_at timestamptz NOT NULL DEFAULT now(),
- CHECK ((kind='member' AND role IS NULL) OR (kind='staff' AND role IS NOT NULL))
+ CHECK ((kind IN ('member','trainer') AND role IS NULL) OR (kind='staff' AND role IS NOT NULL))
 );
 CREATE TABLE IF NOT EXISTS hw2.members (
  id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS hw2.members (
 );
 CREATE TABLE IF NOT EXISTS hw2.trainers (
  id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+ account_id integer UNIQUE REFERENCES hw2.accounts(id),
  name text NOT NULL CHECK (length(trim(name)) BETWEEN 1 AND 100),
  working_days integer[] NOT NULL CHECK (working_days <@ ARRAY[0,1,2,3,4,5,6])
 );
@@ -39,6 +40,8 @@ CREATE TABLE IF NOT EXISTS hw2.reservations (
  pass_id integer NOT NULL, trainer_id integer NOT NULL REFERENCES hw2.trainers(id),
  starts_at timestamptz NOT NULL,
  status text NOT NULL DEFAULT 'booked' CHECK (status IN ('booked','completed','cancelled','noshow')),
+ approval text NOT NULL DEFAULT 'approved' CONSTRAINT reservation_approval_check CHECK (approval IN ('pending','approved','rejected')),
+ CONSTRAINT reservation_approval_status_check CHECK ((approval<>'rejected' OR status='cancelled') AND (status NOT IN ('completed','noshow') OR approval='approved')),
  note text NOT NULL DEFAULT '' CHECK (length(note) <= 5000),
  FOREIGN KEY(pass_id,member_id) REFERENCES hw2.passes(id,member_id),
  CHECK (EXTRACT(MINUTE FROM starts_at AT TIME ZONE 'Asia/Seoul')=0 AND EXTRACT(SECOND FROM starts_at AT TIME ZONE 'Asia/Seoul')=0)

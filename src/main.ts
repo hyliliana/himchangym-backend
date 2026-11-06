@@ -43,6 +43,10 @@ class GymController {
   @Get('member/passes/:id/receipts') async memberReceipts(@Headers('authorization') h:string,@Param('id') v:string){const m=await this.gym.member(await this.gym.authenticate(h));return this.gym.receipts(id(v),m.id);}
   @Get('member/notification-preferences') async preferences(@Headers('authorization') h:string){return this.gym.notificationPreferences(await this.gym.authenticate(h));}
   @Patch('member/notification-preferences') async updatePreferences(@Headers('authorization') h:string,@Body() b:any){return this.gym.updateNotificationPreferences(await this.gym.authenticate(h),b);}
+  @Get('trainer/reservations') async trainerReservations(@Headers('authorization') h:string){return this.gym.trainerReservations(await this.gym.authenticate(h));}
+  @Patch('trainer/reservations/:id') async updateTrainerReservation(@Headers('authorization') h:string,@Param('id') v:string,@Body() b:any){return this.gym.updateTrainerReservation(await this.gym.authenticate(h),id(v),b);}
+  @Post('admin/trainers/:id/account') async createTrainerAccount(@Headers('authorization') h:string,@Param('id') v:string,@Body() b:any){return this.gym.createTrainerAccount(await this.staff(h,true),id(v),b);}
+  @Post('admin/trainers/:id/reset-password') async resetTrainerPassword(@Headers('authorization') h:string,@Param('id') v:string){return this.gym.resetTrainerPassword(await this.staff(h,true),id(v));}
   private async staff(h:string,admin=false){const a=await this.gym.authenticate(h);this.gym.requireStaff(a,admin);return a;}
   @Get('admin/dashboard') async adminDashboard(@Headers('authorization') h:string){await this.staff(h);return this.gym.adminDashboard();}
   @Get('admin/members') async members(@Headers('authorization') h:string,@Query('q') q?:string,@Query('includeDeleted') deleted?:string){await this.staff(h);return this.gym.members(q,queryBoolean(deleted));}
@@ -50,7 +54,7 @@ class GymController {
   @Patch('admin/members/:id') async updateMember(@Headers('authorization') h:string,@Param('id') v:string,@Body() b:any){await this.staff(h);return this.gym.updateMember(id(v),b??{},true);}
   @Delete('admin/members/:id') async deleteMember(@Headers('authorization') h:string,@Param('id') v:string){await this.staff(h);return this.gym.entityState('members',id(v));}
   @Post('admin/members/:id/restore') async restoreMember(@Headers('authorization') h:string,@Param('id') v:string){await this.staff(h);return this.gym.entityState('members',id(v),true);}
-  @Get('admin/catalog') async adminCatalog(@Headers('authorization') h:string,@Query('includeDeleted') deleted?:string){await this.staff(h);return this.gym.catalog(queryBoolean(deleted));}
+  @Get('admin/catalog') async adminCatalog(@Headers('authorization') h:string,@Query('includeDeleted') deleted?:string){await this.staff(h);return this.gym.catalog(queryBoolean(deleted),true);}
   @Get('admin/passes') async passes(@Headers('authorization') h:string,@Query('memberId') m?:string){await this.staff(h);return {passes:await this.gym.passes(m?id(m):undefined)};}
   @Post('admin/passes') async issue(@Headers('authorization') h:string,@Body() b:any){await this.staff(h);return this.gym.issuePass(b??{});}
   @Get('admin/passes/:id/receipts') async adminReceipts(@Headers('authorization') h:string,@Param('id') v:string){await this.staff(h);return this.gym.receipts(id(v));}
